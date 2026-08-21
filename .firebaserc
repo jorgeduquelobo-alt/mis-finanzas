@@ -1,12 +1,12 @@
 {
   "projects": {
-    "default": "brewbooks-mvp"
+    "default": "mis-finanzas-lobo"
   },
   "targets": {
-    "brewbooks-mvp": {
+    "mis-finanzas-lobo": {
       "hosting": {
         "finanzas": [
-          "mis-finanzas-jj"
+          "mis-finanzas-lobo"
         ]
       }
     }
