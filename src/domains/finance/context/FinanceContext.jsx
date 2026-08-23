@@ -10,10 +10,17 @@ export const useFinance = () => useContext(FinanceContext);
 
 const DEFAULT_CONFIG = {
     currencies: ['COP', 'USD', 'EUR'],
-    accounts: ['Efectivo', 'Tarjeta de Crédito Principal', 'Cuenta Bancaria'],
+    accounts: ['Efectivo', 'Tarjeta de Crédito Principal', 'Cuenta Bancaria', 'Fondo de Seguridad Financiera'],
     // Config de instancia (editable en Settings → Finanzas)
     gmailLabel: 'Bancos/PendingBot',
     exchangeRate: 4100,
+    // Fondo de Seguridad Financiera: al registrar un ingreso real (type
+    // 'credit'), se aparta automáticamente este % hacia `fondo10Cuenta` como
+    // una Transferencia. Nunca aplica a gastos. fondo10Activo permite
+    // apagarlo sin borrar la configuración.
+    fondo10Cuenta: 'Fondo de Seguridad Financiera',
+    fondo10Porcentaje: 10,
+    fondo10Activo: true,
     categories: [
         { name: 'Hogar', subcategories: ['Arriendo', 'Servicios Públicos', 'Internet', 'Plan Celular', 'Mercado', 'Aseo', 'Mantenimiento', 'Muebles', 'Utensilios y accesorios'], icon: 'home', type: 'debit', context: 'personal' },
         { name: 'Comida', subcategories: ['Domicilios / Rappi', 'Restaurantes / Cafés'], icon: 'restaurant', type: 'debit', context: 'personal' },
@@ -163,6 +170,39 @@ export const FinanceProvider = ({ children }) => {
         }
     }, []);
 
+    // Aparta automáticamente un % de un ingreso real hacia el Fondo de
+    // Seguridad Financiera, como una Transferencia — el mismo mecanismo que
+    // usa la app cuando el usuario transfiere entre cuentas a mano. Nunca se
+    // aplica a gastos, y nunca se aplica sobre el propio fondo (evita que un
+    // rendimiento del fondo se vuelva a apartar sobre sí mismo). Best-effort:
+    // si falla, no debe impedir que el ingreso original se haya guardado.
+    const registrarAporteFondo10 = useCallback(async (tx) => {
+        const cuentaFondo = (appConfig.fondo10Cuenta || DEFAULT_CONFIG.fondo10Cuenta || '').trim();
+        const porcentaje = Number(appConfig.fondo10Porcentaje ?? DEFAULT_CONFIG.fondo10Porcentaje);
+        const activo = appConfig.fondo10Activo !== false; // activo por defecto si no está configurado
+        if (!activo || !porcentaje || !cuentaFondo || tx.card === cuentaFondo) return;
+
+        const aporte = Math.round(Number(tx.amount) * porcentaje / 100);
+        if (!aporte || aporte <= 0) return;
+
+        await addDoc(collection(db, 'finance_transactions'), {
+            title: `Aporte automático ${porcentaje}% — Fondo de Seguridad`,
+            amount: aporte,
+            currency: tx.currency || 'COP',
+            type: 'transfer',
+            context: tx.context || 'personal',
+            destinationContext: tx.context || 'personal',
+            category: 'Financiero y Deudas',
+            subcategory: '',
+            card: tx.card || 'general',
+            destinationCard: cuentaFondo,
+            comments: `${porcentaje}% de "${tx.title || 'ingreso'}" apartado automáticamente.`,
+            date: tx.date,
+            timestamp: Timestamp.now(),
+            status: 'reviewed',
+        });
+    }, [appConfig]);
+
     const addTransaction = useCallback(async (data) => {
         try {
             const today = new Date();
@@ -171,17 +211,26 @@ export const FinanceProvider = ({ children }) => {
             const day = String(today.getDate()).padStart(2, '0');
             const defaultDateStr = `${year}-${month}-${day}`;
 
-            await addDoc(collection(db, 'finance_transactions'), {
+            const txData = {
                 date: defaultDateStr,
                 timestamp: Timestamp.now(),
                 status: 'reviewed',
                 ...data,
-            });
+            };
+            await addDoc(collection(db, 'finance_transactions'), txData);
+
+            if (txData.type === 'credit') {
+                try {
+                    await registrarAporteFondo10(txData);
+                } catch (error) {
+                    console.error("Error registrando el aporte automático al Fondo de Seguridad (no crítico): ", error);
+                }
+            }
         } catch (error) {
             console.error("Error adding document: ", error);
             throw error;
         }
-    }, []);
+    }, [registrarAporteFondo10]);
 
     const addTransfer = useCallback(async (transferData) => {
         try {
