@@ -35,6 +35,14 @@ GMAIL_SCOPES = ['https://www.googleapis.com/auth/gmail.modify']
 # el flag --label, que tiene prioridad sobre ambos)
 DEFAULT_LABEL = "Bancos/PendingBot"
 
+# Fondo de Seguridad Financiera: al guardar un ingreso real (type 'credit')
+# se aparta automáticamente este % hacia FONDO10_CUENTA como una
+# Transferencia. Igual que gmailLabel, se puede sobreescribir con
+# fondo10Cuenta / fondo10Porcentaje / fondo10Activo en finance_settings/default
+# (editable en la app en Settings → Finanzas).
+FONDO10_CUENTA = "Fondo de Seguridad Financiera"
+FONDO10_PORCENTAJE = 10
+
 # Modelo de Gemini
 GEMINI_MODEL = "gemini-3.1-flash-lite"
 
@@ -369,10 +377,70 @@ def registrar_transaccion(datos_ia, tx_dt, db, cat_tree, dry_run=False):
             enviar_push_pending(db, doc_ref.id, nueva_transaccion)
         except Exception as e:
             print(f"⚠️ No se pudo enviar la notificación push (no crítico): {e}")
+        # El aporte al Fondo de Seguridad también es best-effort: si falla no
+        # debe hacer que el ingreso original se dé por no guardado.
+        if nueva_transaccion['type'] == 'credit':
+            try:
+                registrar_aporte_fondo10(db, nueva_transaccion)
+            except Exception as e:
+                print(f"⚠️ No se pudo registrar el aporte automático al Fondo de Seguridad (no crítico): {e}")
         return True
     except Exception as e:
         print(f"❌ Error al guardar en Firebase: {e}")
         return False
+
+
+def get_fondo10_config(db):
+    """Config del Fondo de Seguridad Financiera (cuenta, %, activo/inactivo),
+    editable en finance_settings/default junto a gmailLabel. Fallback a los
+    valores por defecto si el documento no existe o Firestore no responde."""
+    try:
+        doc = db.collection('finance_settings').document('default').get()
+        if doc.exists:
+            data = doc.to_dict()
+            cuenta = (data.get('fondo10Cuenta') or '').strip() or FONDO10_CUENTA
+            porcentaje = data.get('fondo10Porcentaje', FONDO10_PORCENTAJE)
+            activo = data.get('fondo10Activo', True)
+            return cuenta, float(porcentaje), bool(activo)
+    except Exception as e:
+        print(f"⚠️ No se pudo leer la config del Fondo de Seguridad de Firestore ({e}); uso valores por defecto.")
+    return FONDO10_CUENTA, FONDO10_PORCENTAJE, True
+
+
+def registrar_aporte_fondo10(db, tx):
+    """Al guardar un ingreso real, aparta automáticamente un % hacia el Fondo
+    de Seguridad Financiera como una Transferencia — el mismo mecanismo que
+    usa la app cuando el usuario transfiere entre cuentas a mano. Nunca se
+    aplica a gastos, ni al propio fondo aportándose sobre sí mismo (ej. un
+    rendimiento que caiga directo en esa cuenta)."""
+    cuenta_fondo, porcentaje, activo = get_fondo10_config(db)
+    if not activo or not porcentaje or not cuenta_fondo:
+        return
+    if tx.get('card') == cuenta_fondo:
+        return
+
+    aporte = round(float(tx['amount']) * porcentaje / 100)
+    if aporte <= 0:
+        return
+
+    aporte_doc = {
+        "title": f"Aporte automático {porcentaje:g}% — Fondo de Seguridad",
+        "amount": aporte,
+        "currency": tx.get('currency', 'COP'),
+        "type": "transfer",
+        "context": tx.get('context', 'personal'),
+        "destinationContext": tx.get('context', 'personal'),
+        "category": "Financiero y Deudas",
+        "subcategory": "",
+        "card": tx.get('card', 'general'),
+        "destinationCard": cuenta_fondo,
+        "comments": f"{porcentaje:g}% de \"{tx.get('title', 'ingreso')}\" apartado automáticamente.",
+        "date": tx.get('date'),
+        "timestamp": tx.get('timestamp'),
+        "status": "reviewed",
+    }
+    _, ref = db.collection('finance_transactions').add(aporte_doc)
+    print(f"💰 Aporte automático de {aporte} {aporte_doc['currency']} registrado al Fondo de Seguridad (ID: {ref.id}).")
 
 
 def enviar_push_pending(db, tx_id, tx):
