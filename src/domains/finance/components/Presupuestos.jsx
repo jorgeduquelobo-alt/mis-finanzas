@@ -72,10 +72,22 @@ export default function Presupuestos({ onNavigate }) {
 
   const presupuestadoTotal = useMemo(() => enrichedCategories.reduce((a, c) => a + Number(c.limite), 0), [enrichedCategories]);
 
+  // BUGFIX: antes filtraba por `t.account`, un campo que ninguna transacción
+  // usa (las transacciones guardan la cuenta en `t.card`/`t.destinationCard`),
+  // así que ninguna Meta mostraba nunca progreso. Además de ingresos directos
+  // a la cuenta de la meta, cuenta también el dinero que llega por
+  // Transferencia (ej. el aporte automático del Fondo de Seguridad).
   const goalSavings = useMemo(() => {
     const s = {};
     goals.forEach(g => {
-      if (g.cuenta) s[g.id] = transactions.filter(t => t.type === 'credit' && t.account === g.cuenta).reduce((a, t) => a + Number(t.amount), 0);
+      if (g.cuenta) {
+        s[g.id] = transactions
+          .filter(t =>
+            (t.type === 'credit' && t.card === g.cuenta) ||
+            (t.type === 'transfer' && t.destinationCard === g.cuenta)
+          )
+          .reduce((a, t) => a + Number(t.amount), 0);
+      }
     });
     return s;
   }, [transactions, goals]);
