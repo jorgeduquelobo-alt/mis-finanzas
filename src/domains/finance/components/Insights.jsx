@@ -205,7 +205,7 @@ export default function Insights({ onNavigate, onEditTransaction }) {
       <Card padding={20} style={{ background: 'var(--ink-800)', color: '#fff', borderRadius: 28 }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <Eyebrow style={{ color: 'rgba(255,255,255,0.55)' }}>
-            Hoy · {today.toLocaleDateString('es-CO', { day: 'numeric', month: 'short' })}
+            Gastado hoy · {today.toLocaleDateString('es-CO', { day: 'numeric', month: 'short' })}
           </Eyebrow>
           <Pill variant="clay" icon="bolt">En vivo</Pill>
         </div>
