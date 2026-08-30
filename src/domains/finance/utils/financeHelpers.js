@@ -75,3 +75,57 @@ export const calculateBalances = (transactions) => {
 
     return { netWorth, personalBalance, businessCashFlow };
 };
+
+/**
+ * Calculates a running balance per tracked account, starting from a manually
+ * fijado "saldo inicial" (opening balance) and forward-summing every
+ * transaction posted strictly after that account's anchor moment.
+ *
+ * Each account is independent: only transactions whose `card` (debit/credit)
+ * or `card`/`destinationCard` (transfer) match the account name, and whose
+ * moment is after that specific account's anchor, are counted. This lets
+ * each account be "fijado" (re-anchored) at a different point in time
+ * without disturbing the others — same idea as `pagosManuales` for Costos
+ * Fijos: a manual checkpoint the user can refresh whenever they check the
+ * real balance in the bank's own app.
+ *
+ * @param {Array<{type:string, amount:number, currency?:string, card?:string, destinationCard?:string, date?:Date, sortAt?:Date}>} transactions
+ *   Parsed transactions (as produced by FinanceContext — `date`/`sortAt` already Date objects).
+ * @param {Object<string, {monto:number, anchor:string}>} saldosIniciales
+ *   Map de nombre de cuenta -> { monto: saldo fijado, anchor: ISO string del momento en que se fijó }.
+ * @param {number} [exchangeRate=4100] - Tasa USD→COP para convertir movimientos que no estén en COP.
+ * @returns {Object<string, {balance:number, monto:number, anchor:string}>}
+ */
+export const calculateAccountBalances = (transactions, saldosIniciales, exchangeRate = 4100) => {
+    const result = {};
+    const rate = Number(exchangeRate) > 0 ? Number(exchangeRate) : 4100;
+
+    Object.entries(saldosIniciales || {}).forEach(([accountName, cfg]) => {
+        if (!cfg || typeof cfg.monto !== 'number' || isNaN(cfg.monto) || !cfg.anchor) return;
+        const anchor = new Date(cfg.anchor);
+        if (isNaN(anchor.getTime())) return;
+
+        let balance = cfg.monto;
+
+        transactions.forEach((t) => {
+            const moment = t.sortAt || t.date;
+            if (!moment || !(moment > anchor)) return;
+
+            const rawAmount = Number(t.amount);
+            if (!rawAmount || isNaN(rawAmount)) return;
+            const amount = t.currency === 'USD' ? rawAmount * rate : rawAmount;
+
+            if (t.type === 'transfer' || t.isTransfer === true) {
+                if (t.card === accountName) balance -= amount;
+                if (t.destinationCard === accountName) balance += amount;
+            } else if (t.card === accountName) {
+                if (t.type === 'debit') balance -= amount;
+                else if (t.type === 'credit') balance += amount;
+            }
+        });
+
+        result[accountName] = { balance, monto: cfg.monto, anchor: cfg.anchor };
+    });
+
+    return result;
+};
