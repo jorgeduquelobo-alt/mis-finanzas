@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { normalizeCategory, parseTransactionDate, calculateBalances } from './financeHelpers';
+import { normalizeCategory, parseTransactionDate, calculateBalances, calculateAccountBalances } from './financeHelpers';
 
 // ─────────────────────────────────────────────────
 // normalizeCategory
@@ -221,5 +221,129 @@ describe('calculateBalances', () => {
         expect(result.personalBalance.COP).toBe(40000);
         expect(result.netWorth.USD).toBe(5000);
         expect(result.businessCashFlow.USD).toBe(5000);
+    });
+});
+
+// ─────────────────────────────────────────────────
+// calculateAccountBalances
+// ─────────────────────────────────────────────────
+describe('calculateAccountBalances', () => {
+    const ANCHOR = '2026-08-30T12:00:00.000Z';
+    const before = new Date('2026-08-29T12:00:00.000Z');
+    const after1 = new Date('2026-08-30T18:00:00.000Z');
+    const after2 = new Date('2026-08-31T09:00:00.000Z');
+
+    it('returns empty object when no saldosIniciales are configured', () => {
+        expect(calculateAccountBalances([], {})).toEqual({});
+        expect(calculateAccountBalances([], undefined)).toEqual({});
+        expect(calculateAccountBalances([], null)).toEqual({});
+    });
+
+    it('ignores accounts with no monto or no anchor', () => {
+        const saldos = {
+            SinMonto: { anchor: ANCHOR },
+            SinAnchor: { monto: 1000 },
+            Ok: { monto: 500, anchor: ANCHOR },
+        };
+        const result = calculateAccountBalances([], saldos);
+        expect(result.SinMonto).toBeUndefined();
+        expect(result.SinAnchor).toBeUndefined();
+        expect(result.Ok).toEqual({ balance: 500, monto: 500, anchor: ANCHOR });
+    });
+
+    it('returns the opening balance untouched when there are no matching transactions', () => {
+        const saldos = { Bold: { monto: 562020, anchor: ANCHOR } };
+        const result = calculateAccountBalances([], saldos);
+        expect(result.Bold.balance).toBe(562020);
+    });
+
+    it('ignores transactions dated before or exactly at the anchor', () => {
+        const saldos = { Bold: { monto: 562020, anchor: ANCHOR } };
+        const txs = [
+            { type: 'debit', amount: 100000, currency: 'COP', card: 'Bold', date: before, sortAt: before },
+            { type: 'debit', amount: 200000, currency: 'COP', card: 'Bold', date: new Date(ANCHOR), sortAt: new Date(ANCHOR) },
+        ];
+        const result = calculateAccountBalances(txs, saldos);
+        expect(result.Bold.balance).toBe(562020);
+    });
+
+    it('subtracts debits and adds credits posted after the anchor', () => {
+        const saldos = { Bancolombia: { monto: 1923980, anchor: ANCHOR } };
+        const txs = [
+            { type: 'debit', amount: 50000, currency: 'COP', card: 'Bancolombia', date: after1, sortAt: after1 },
+            { type: 'credit', amount: 200000, currency: 'COP', card: 'Bancolombia', date: after2, sortAt: after2 },
+        ];
+        const result = calculateAccountBalances(txs, saldos);
+        expect(result.Bancolombia.balance).toBe(1923980 - 50000 + 200000);
+    });
+
+    it('ignores transactions tagged to a different account', () => {
+        const saldos = { Nequi: { monto: 8212, anchor: ANCHOR } };
+        const txs = [
+            { type: 'debit', amount: 5000, currency: 'COP', card: 'Bold', date: after1, sortAt: after1 },
+        ];
+        const result = calculateAccountBalances(txs, saldos);
+        expect(result.Nequi.balance).toBe(8212);
+    });
+
+    it('moves money between two tracked accounts on a transfer (source -, destination +)', () => {
+        const saldos = {
+            Bancolombia: { monto: 1000000, anchor: ANCHOR },
+            'Fondo de Seguridad Financiera': { monto: 4814890, anchor: ANCHOR },
+        };
+        const txs = [
+            { type: 'transfer', amount: 100000, currency: 'COP', card: 'Bancolombia', destinationCard: 'Fondo de Seguridad Financiera', date: after1, sortAt: after1 },
+        ];
+        const result = calculateAccountBalances(txs, saldos);
+        expect(result.Bancolombia.balance).toBe(900000);
+        expect(result['Fondo de Seguridad Financiera'].balance).toBe(4914890);
+    });
+
+    it('treats isTransfer:true the same as type:"transfer"', () => {
+        const saldos = { Bold: { monto: 100000, anchor: ANCHOR } };
+        const txs = [
+            { isTransfer: true, type: 'debit', amount: 20000, currency: 'COP', card: 'Bold', destinationCard: 'Nequi', date: after1, sortAt: after1 },
+        ];
+        const result = calculateAccountBalances(txs, saldos);
+        expect(result.Bold.balance).toBe(80000);
+    });
+
+    it('converts USD transactions to COP using the given exchange rate', () => {
+        const saldos = { Bold: { monto: 100000, anchor: ANCHOR } };
+        const txs = [
+            { type: 'debit', amount: 10, currency: 'USD', card: 'Bold', date: after1, sortAt: after1 },
+        ];
+        const result = calculateAccountBalances(txs, saldos, 4000);
+        expect(result.Bold.balance).toBe(100000 - 40000);
+    });
+
+    it('falls back to a 4100 exchange rate when none is given', () => {
+        const saldos = { Bold: { monto: 100000, anchor: ANCHOR } };
+        const txs = [
+            { type: 'credit', amount: 10, currency: 'USD', card: 'Bold', date: after1, sortAt: after1 },
+        ];
+        const result = calculateAccountBalances(txs, saldos);
+        expect(result.Bold.balance).toBe(100000 + 41000);
+    });
+
+    it('computes several independent accounts in one pass, matching the Saldo Total use case', () => {
+        const saldos = {
+            Bold: { monto: 562020, anchor: ANCHOR },
+            Nequi: { monto: 8212, anchor: ANCHOR },
+            Bancolombia: { monto: 1923980, anchor: ANCHOR },
+            'Fondo de Seguridad Financiera': { monto: 4814890, anchor: ANCHOR },
+        };
+        const txs = [
+            { type: 'debit', amount: 20000, currency: 'COP', card: 'Bold', date: after1, sortAt: after1 },
+            { type: 'credit', amount: 100000, currency: 'COP', card: 'Bancolombia', date: after1, sortAt: after1 },
+            { type: 'transfer', amount: 10000, currency: 'COP', card: 'Bancolombia', destinationCard: 'Fondo de Seguridad Financiera', date: after2, sortAt: after2 },
+        ];
+        const result = calculateAccountBalances(txs, saldos);
+        const trackedTotal = result.Bold.balance + result.Nequi.balance + result.Bancolombia.balance;
+        expect(result.Bold.balance).toBe(542020);
+        expect(result.Nequi.balance).toBe(8212);
+        expect(result.Bancolombia.balance).toBe(1923980 + 100000 - 10000);
+        expect(result['Fondo de Seguridad Financiera'].balance).toBe(4814890 + 10000);
+        expect(trackedTotal).toBe(542020 + 8212 + 2013980);
     });
 });

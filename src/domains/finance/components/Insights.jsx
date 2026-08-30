@@ -17,12 +17,26 @@ const txDate = (t) => (t.date?.toDate ? t.date.toDate() : new Date(t.date));
 const midnight = (d) => { const x = new Date(d); x.setHours(0, 0, 0, 0); return x; };
 
 export default function Insights({ onNavigate, onEditTransaction }) {
-  const { transactions, loading, currentContext, appConfig } = useFinance();
+  const { transactions, loading, currentContext, appConfig, accountBalances } = useFinance();
 
   // Tasa USD→COP configurable en Settings → Finanzas; fallback al valor histórico.
   const exchangeRate = Number(appConfig?.exchangeRate) > 0
     ? Number(appConfig.exchangeRate)
     : DEFAULT_EXCHANGE_RATE;
+
+  // Saldo Total: suma de las cuentas fijadas en Settings → Finanzas → Saldos,
+  // excluyendo el Fondo de Seguridad Financiera (se muestra aparte, como
+  // meta teórica — nunca se suma al saldo con el que realmente se cuenta).
+  const fondoNombre = appConfig?.fondo10Cuenta || 'Fondo de Seguridad Financiera';
+  const cuentasSaldo = useMemo(
+    () => Object.keys(accountBalances || {}).filter(name => name !== fondoNombre),
+    [accountBalances, fondoNombre]
+  );
+  const saldoTotal = useMemo(
+    () => cuentasSaldo.reduce((sum, name) => sum + (accountBalances[name]?.balance || 0), 0),
+    [cuentasSaldo, accountBalances]
+  );
+  const fondoBalance = accountBalances?.[fondoNombre]?.balance;
 
   const filtered = useMemo(() => (
     transactions.filter(t => {
@@ -200,6 +214,43 @@ export default function Insights({ onNavigate, onEditTransaction }) {
             : <>Tu <span style={{ color: 'var(--clay-500)' }}>radiografía</span> financiera.</>}
         </Editorial>
       </div>
+
+      {/* Saldo total — cuentas fijadas en Settings → Finanzas → Saldos */}
+      {cuentasSaldo.length > 0 && (
+        <Card padding={18} style={{ borderRadius: 24 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <Eyebrow>Saldo total · {cuentasSaldo.join(' + ')}</Eyebrow>
+            <Icon name="account_balance_wallet" size={18} color="var(--fg-3)" />
+          </div>
+          <div style={{ marginTop: 6, fontSize: 30, fontWeight: 800, letterSpacing: '-0.02em', color: 'var(--fg-1)', fontVariantNumeric: 'tabular-nums' }}>
+            {formatCurrency(saldoTotal, 'COP')}
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 12 }}>
+            {cuentasSaldo.map(name => (
+              <div key={name} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13 }}>
+                <span style={{ color: 'var(--fg-3)', fontWeight: 600 }}>{name}</span>
+                <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 700, color: 'var(--fg-1)' }}>
+                  {formatCurrency(accountBalances[name].balance, 'COP')}
+                </span>
+              </div>
+            ))}
+          </div>
+          {typeof fondoBalance === 'number' && (
+            <div style={{
+              marginTop: 14, paddingTop: 12, borderTop: '1px dashed var(--border-default)',
+              display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10,
+            }}>
+              <div>
+                <Eyebrow>{fondoNombre}</Eyebrow>
+                <div style={{ fontSize: 11, color: 'var(--fg-4)', marginTop: 2 }}>Meta teórica · aparte del saldo total</div>
+              </div>
+              <div style={{ fontFamily: 'var(--font-mono)', fontWeight: 800, fontSize: 16, color: 'var(--olive-600)', whiteSpace: 'nowrap' }}>
+                {formatCurrency(fondoBalance, 'COP')}
+              </div>
+            </div>
+          )}
+        </Card>
+      )}
 
       {/* Hero — daily pulse */}
       <Card padding={20} style={{ background: 'var(--ink-800)', color: '#fff', borderRadius: 28 }}>

@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useMemo, useCallback } from 'react';
 import { db } from '../../../firebase';
 import { collection, onSnapshot, addDoc, doc, setDoc, getDoc, Timestamp, deleteDoc, updateDoc } from 'firebase/firestore';
-import { normalizeCategory, parseTransactionDate, calculateBalances } from '../utils/financeHelpers';
+import { normalizeCategory, parseTransactionDate, calculateBalances, calculateAccountBalances } from '../utils/financeHelpers';
 
 const FinanceContext = createContext();
 
@@ -296,6 +296,32 @@ export const FinanceProvider = ({ children }) => {
     // Memoize global balance calculations to avoid re-computing on every render/call
     const balances = useMemo(() => calculateBalances(transactions), [transactions]);
 
+    // Saldo por cuenta (Saldo Total / Fondo de Seguridad): saldo fijado a mano
+    // en Settings ("Saldos") + movimientos reales posteriores a ese momento.
+    // Ver `calculateAccountBalances` para el detalle del cálculo.
+    const accountBalances = useMemo(
+        () => calculateAccountBalances(transactions, appConfig.saldosIniciales, appConfig.exchangeRate),
+        [transactions, appConfig.saldosIniciales, appConfig.exchangeRate]
+    );
+
+    // Fija (o re-fija) el saldo actual de una cuenta como nuevo punto de
+    // partida — el "ahora" queda como ancla, así que los movimientos ya
+    // registrados no se vuelven a contar y solo los nuevos mueven el saldo
+    // hacia adelante. Mismo patrón que markFixedCostPaid: un checkpoint
+    // manual que el usuario refresca cuando revisa el saldo real del banco.
+    const setSaldoInicial = useCallback(async (accountName, monto) => {
+        const value = Number(monto);
+        if (!accountName || isNaN(value)) return;
+        try {
+            const saldosIniciales = { ...(appConfig.saldosIniciales || {}) };
+            saldosIniciales[accountName] = { monto: value, anchor: new Date().toISOString() };
+            await updateAppConfig({ ...appConfig, saldosIniciales });
+        } catch (error) {
+            console.error("Error fijando saldo inicial: ", error);
+            throw error;
+        }
+    }, [appConfig, updateAppConfig]);
+
     // Calculate balances based on context and transaction type
     const getTotals = useCallback((contextFilter) => {
         // filter transactions based on context ('personal', 'business' or 'unified')
@@ -464,6 +490,8 @@ export const FinanceProvider = ({ children }) => {
         deleteTransaction,
         updateTransaction,
         getTotals,
+        accountBalances,
+        setSaldoInicial,
         appConfig,
         updateAppConfig,
         addGoal,
@@ -476,7 +504,7 @@ export const FinanceProvider = ({ children }) => {
         fetchBudgetConfig,
         saveBudgetConfig,
     }), [
-        transactions, budgets, goals, fixedCosts, loading, currentContext, getTotals, appConfig,
+        transactions, budgets, goals, fixedCosts, loading, currentContext, getTotals, accountBalances, setSaldoInicial, appConfig,
         addTransaction, addTransfer, deleteTransaction, updateTransaction,
         updateAppConfig, addGoal, updateGoal, deleteGoal,
         addFixedCost, updateFixedCost, deleteFixedCost, markFixedCostPaid, fetchBudgetConfig, saveBudgetConfig,

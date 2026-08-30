@@ -5,6 +5,7 @@ import { useFinance } from '../context/FinanceContext';
 import { useAuth } from '../context/AuthContext';
 import { Icon, Card, Eyebrow, Segmented } from '../shared/ds/Primitives';
 import ConfirmModal from '../shared/components/ConfirmModal';
+import { formatCurrency } from '../shared/utils/format';
 
 const INPUT_STYLE = {
     flex: 1, padding: '9px 12px',
@@ -693,6 +694,108 @@ const NotificationsSection = ({ push }) => {
     );
 };
 
+// Saldos por cuenta: el usuario fija el saldo real de una cuenta (el que ve
+// en el banco) y desde ese momento la app lo sigue sola sumando/restando los
+// movimientos que se registren para esa cuenta (`setSaldoInicial` guarda el
+// momento exacto — "anchor" — así los movimientos ya existentes no se
+// vuelven a contar). El Fondo de Seguridad Financiera se fija igual, por
+// nombre (appConfig.fondo10Cuenta) — Insights lo muestra aparte del Saldo
+// Total, no como parte de la suma.
+const SaldosInicialesSection = ({ appConfig, accountBalances, setSaldoInicial }) => {
+    const [drafts, setDrafts] = useState({});
+    const [savingAccount, setSavingAccount] = useState(null);
+    const accounts = appConfig.accounts || [];
+
+    const handleSave = async (accountName) => {
+        const raw = drafts[accountName];
+        if (raw === undefined || raw === '' || isNaN(Number(raw))) return;
+        setSavingAccount(accountName);
+        try {
+            await setSaldoInicial(accountName, Number(raw));
+            setDrafts(prev => ({ ...prev, [accountName]: '' }));
+        } catch (error) { console.error("Error guardando saldo:", error); }
+        finally { setSavingAccount(null); }
+    };
+
+    return (
+        <div style={{
+            background: 'var(--bg-raised)',
+            border: '1px solid var(--border-default)',
+            borderRadius: 'var(--r-2xl)',
+            padding: 20,
+        }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                <Icon name="account_balance_wallet" size={20} color="var(--clay-500)" />
+                <h3 style={{ margin: 0, fontSize: 16, fontWeight: 800, color: 'var(--fg-1)' }}>Saldos</h3>
+            </div>
+            <p style={{ margin: '0 0 16px', fontSize: 12, color: 'var(--fg-3)' }}>
+                Fija el saldo real de una cuenta (el que ves en el banco) y desde ahí la app lo actualiza sola con cada movimiento nuevo que registres en esa cuenta. Se refleja en el Saldo Total de Radiografía.
+            </p>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {accounts.length === 0 ? (
+                    <p style={{ fontSize: 12, color: 'var(--fg-4)', fontStyle: 'italic', textAlign: 'center', padding: '12px 0' }}>
+                        Sin cuentas. Agrega una en Tarjetas y Cuentas primero.
+                    </p>
+                ) : accounts.map(accountName => {
+                    const fijado = appConfig.saldosIniciales?.[accountName];
+                    const computed = accountBalances?.[accountName]?.balance;
+                    const saving = savingAccount === accountName;
+                    const draft = drafts[accountName] ?? '';
+
+                    return (
+                        <div key={accountName} style={{
+                            padding: '10px 12px',
+                            background: 'var(--bg-sunken)',
+                            border: '1px solid var(--border-subtle)',
+                            borderRadius: 'var(--r-lg)',
+                        }}>
+                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6, gap: 8 }}>
+                                <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--fg-1)' }}>{accountName}</span>
+                                {typeof computed === 'number' && (
+                                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 700, color: 'var(--fg-2)', whiteSpace: 'nowrap' }}>
+                                        {formatCurrency(computed, 'COP')}
+                                    </span>
+                                )}
+                            </div>
+                            <div style={{ display: 'flex', gap: 8 }}>
+                                <input
+                                    type="number"
+                                    placeholder={fijado ? String(fijado.monto) : 'Saldo actual…'}
+                                    style={{ ...INPUT_STYLE, fontSize: 12, padding: '7px 10px' }}
+                                    value={draft}
+                                    onChange={e => setDrafts(prev => ({ ...prev, [accountName]: e.target.value }))}
+                                    onKeyDown={e => e.key === 'Enter' && handleSave(accountName)}
+                                    disabled={saving}
+                                />
+                                <button
+                                    onClick={() => handleSave(accountName)}
+                                    disabled={saving || draft === '' || isNaN(Number(draft))}
+                                    style={{
+                                        width: 38, height: 34, flexShrink: 0,
+                                        background: (saving || draft === '' || isNaN(Number(draft))) ? 'var(--bg-sunken)' : 'var(--ink-800)',
+                                        color: (saving || draft === '' || isNaN(Number(draft))) ? 'var(--fg-4)' : '#fff',
+                                        borderRadius: 'var(--r-lg)', border: 'none',
+                                        cursor: (saving || draft === '' || isNaN(Number(draft))) ? 'not-allowed' : 'pointer',
+                                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                    }}
+                                >
+                                    <Icon name="check" size={16} />
+                                </button>
+                            </div>
+                            {fijado && (
+                                <p style={{ margin: '6px 0 0', fontSize: 10, color: 'var(--fg-4)' }}>
+                                    Fijado en {formatCurrency(fijado.monto, 'COP')} el {new Date(fijado.anchor).toLocaleDateString('es-CO', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                                </p>
+                            )}
+                        </div>
+                    );
+                })}
+            </div>
+        </div>
+    );
+};
+
 // Config de instancia (etiqueta de Gmail del sync, tasa USD→COP) guardada en
 // finance_settings/default junto a los catálogos, vía el mismo updateAppConfig.
 const InstanceConfigSection = ({ appConfig, updateAppConfig }) => {
@@ -911,7 +1014,7 @@ const WhitelistSection = () => {
 };
 
 export default function Settings({ push }) {
-    const { appConfig, updateAppConfig } = useFinance();
+    const { appConfig, updateAppConfig, accountBalances, setSaldoInicial } = useFinance();
     const { currentUser, logout } = useAuth();
     const [saving, setSaving] = useState(false);
     const [newCurrency, setNewCurrency] = useState('');
@@ -1054,6 +1157,10 @@ export default function Settings({ push }) {
                     updateAppConfig={updateAppConfig}
                 />
             </div>
+
+            {/* Saldos por cuenta — alimenta el Saldo Total de Radiografía */}
+            <Eyebrow style={{ paddingLeft: 4, marginTop: 4 }}>Saldos</Eyebrow>
+            <SaldosInicialesSection appConfig={appConfig} accountBalances={accountBalances} setSaldoInicial={setSaldoInicial} />
 
             {/* Instance config */}
             <Eyebrow style={{ paddingLeft: 4, marginTop: 4 }}>Instancia</Eyebrow>
