@@ -37,6 +37,7 @@ export const FinanceProvider = ({ children }) => {
     const [transactions, setTransactions] = useState([]);
     const [budgets, setBudgets] = useState({});
     const [goals, setGoals] = useState([]);
+    const [fixedCosts, setFixedCosts] = useState([]);
     const [loading, setLoading] = useState(true);
     const [currentContext, setCurrentContext] = useState('unified');
 
@@ -152,10 +153,22 @@ export const FinanceProvider = ({ children }) => {
             console.error("Error fetching goals:", error);
         });
 
+        // Subscribe to fixed costs collection (checklist de costos fijos mensuales)
+        const unsubscribeFixedCosts = onSnapshot(collection(db, 'finance_fixed_costs'), (snapshot) => {
+            const fixedCostsData = snapshot.docs.map(doc => ({
+                id: doc.id,
+                ...doc.data(),
+            }));
+            setFixedCosts(fixedCostsData);
+        }, (error) => {
+            console.error("Error fetching fixed costs:", error);
+        });
+
         // Cleanup subscriptions on unmount
         return () => {
             unsubscribeTransactions();
             unsubscribeGoals();
+            unsubscribeFixedCosts();
         }
     }, []);
 
@@ -324,6 +337,55 @@ export const FinanceProvider = ({ children }) => {
         }
     }, []);
 
+    // --- Costos Fijos Methods ---
+    // Un Costo Fijo es una plantilla mensual (nombre, monto esperado, día de
+    // vencimiento) — no una transacción. Cada mes, Presupuestos.jsx cruza
+    // esta plantilla contra las transacciones reales del mes (por nombre) para
+    // saber si ya se pagó, sin que el usuario tenga que marcarlo a mano.
+    const addFixedCost = useCallback(async (data) => {
+        try {
+            await addDoc(collection(db, 'finance_fixed_costs'), data);
+        } catch (error) {
+            console.error("Error adding fixed cost: ", error);
+            throw error;
+        }
+    }, []);
+
+    const updateFixedCost = useCallback(async (id, data) => {
+        try {
+            await updateDoc(doc(db, 'finance_fixed_costs', id), data);
+        } catch (error) {
+            console.error("Error updating fixed cost: ", error);
+            throw error;
+        }
+    }, []);
+
+    // Marca (o desmarca) a mano un costo fijo como pagado en un mes puntual —
+    // red de seguridad para cuando el nombre del movimiento real no coincide
+    // con el costo fijo (ej. un servicio público que cada mes llega con un
+    // título distinto). Solo pisa el mes indicado (dot-path), sin tocar los
+    // demás meses ya marcados. No aplica si ya hay una transacción real
+    // detectada — para ese caso no hace falta marcar nada a mano.
+    const markFixedCostPaid = useCallback(async (id, monthStr, paid) => {
+        try {
+            await updateDoc(doc(db, 'finance_fixed_costs', id), {
+                [`pagosManuales.${monthStr}`]: paid,
+            });
+        } catch (error) {
+            console.error("Error marking fixed cost as paid: ", error);
+            throw error;
+        }
+    }, []);
+
+    const deleteFixedCost = useCallback(async (id) => {
+        try {
+            await deleteDoc(doc(db, 'finance_fixed_costs', id));
+        } catch (error) {
+            console.error("Error deleting fixed cost: ", error);
+            throw error;
+        }
+    }, []);
+
     // --- Presupuestos / Budgets Methods (Automatic Cloning) ---
     // Fetch budget for a specific month and context. If not found, attempts to clone the previous month.
     const fetchBudgetConfig = useCallback(async (monthStr, context) => {
@@ -393,6 +455,7 @@ export const FinanceProvider = ({ children }) => {
         transactions,
         budgets,
         goals,
+        fixedCosts,
         loading,
         currentContext,
         setCurrentContext,
@@ -406,12 +469,17 @@ export const FinanceProvider = ({ children }) => {
         addGoal,
         updateGoal,
         deleteGoal,
+        addFixedCost,
+        updateFixedCost,
+        deleteFixedCost,
+        markFixedCostPaid,
         fetchBudgetConfig,
         saveBudgetConfig,
     }), [
-        transactions, budgets, goals, loading, currentContext, getTotals, appConfig,
+        transactions, budgets, goals, fixedCosts, loading, currentContext, getTotals, appConfig,
         addTransaction, addTransfer, deleteTransaction, updateTransaction,
-        updateAppConfig, addGoal, updateGoal, deleteGoal, fetchBudgetConfig, saveBudgetConfig,
+        updateAppConfig, addGoal, updateGoal, deleteGoal,
+        addFixedCost, updateFixedCost, deleteFixedCost, markFixedCostPaid, fetchBudgetConfig, saveBudgetConfig,
     ]);
 
     return (

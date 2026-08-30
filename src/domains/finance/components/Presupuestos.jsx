@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import PresupuestoModal from './PresupuestoModal';
 import MetaModal from './MetaModal';
+import CostoFijoModal from './CostoFijoModal';
 import { useFinance } from '../context/FinanceContext';
-import { format, subMonths, addMonths } from 'date-fns';
+import { format, subMonths, addMonths, isSameMonth } from 'date-fns';
 import { es } from 'date-fns/locale';
 import { formatCurrency } from '../../../shared/utils/format';
 import {
@@ -13,12 +14,14 @@ import ContextSwitcher from './ContextSwitcher';
 const HUE_CYCLE = ['clay', 'olive', 'amber', 'plum', 'ink'];
 
 export default function Presupuestos({ onNavigate }) {
-  const { budgets, fetchBudgetConfig, saveBudgetConfig, goals, transactions, appConfig, currentContext } = useFinance();
+  const { budgets, fetchBudgetConfig, saveBudgetConfig, goals, fixedCosts, markFixedCostPaid, transactions, appConfig, currentContext } = useFinance();
   const [currentDate, setCurrentDate] = useState(new Date());
   const [isPresupuestoModalOpen, setIsPresupuestoModalOpen] = useState(false);
   const [editingCategory, setEditingCategory] = useState(null);
   const [isMetaModalOpen, setIsMetaModalOpen] = useState(false);
   const [editingMeta, setEditingMeta] = useState(null);
+  const [isCostoFijoModalOpen, setIsCostoFijoModalOpen] = useState(false);
+  const [editingCostoFijo, setEditingCostoFijo] = useState(null);
 
   const monthStr     = format(currentDate, 'yyyy-MM');
   const monthDisplay = format(currentDate, 'MMMM yyyy', { locale: es });
@@ -97,6 +100,58 @@ export default function Presupuestos({ onNavigate }) {
       .filter(g => currentContext === 'unified' ? true : g.contexto === currentContext)
       .map(g => ({ ...g, ahorrado: goalSavings[g.id] || 0 })),
     [goals, currentContext, goalSavings]);
+
+  // --- Costos Fijos ---
+  // La app no sabe de antemano si un costo fijo ya se pagó — lo cruza cada
+  // mes contra las transacciones reales de ese contexto, buscando el nombre
+  // del costo fijo dentro del título o los comentarios del movimiento (ej.
+  // "Netflix" adentro de "Netflix.com"). Si no aparece ningún movimiento que
+  // coincida, sigue "Pendiente" (o "Atrasado" si ya pasó el día de vencimiento
+  // y estamos viendo el mes real actual).
+  const monthDebitsCtx = useMemo(() =>
+    monthTransactions.filter(t =>
+      t.type === 'debit' && !(t.type === 'transfer' || t.isTransfer) && t.context === contextoKey
+    ),
+    [monthTransactions, contextoKey]);
+
+  const isCurrentRealMonth = useMemo(() => isSameMonth(currentDate, new Date()), [currentDate]);
+  const todayDayOfMonth = new Date().getDate();
+
+  const localFixedCosts = useMemo(() =>
+    fixedCosts
+      .filter(f => currentContext === 'unified' ? true : f.contexto === currentContext)
+      .map(f => {
+        const nombreLower = (f.nombre || '').trim().toLowerCase();
+        const match = monthDebitsCtx.find(t =>
+          (t.title || '').toLowerCase().includes(nombreLower) ||
+          (t.comments || '').toLowerCase().includes(nombreLower)
+        );
+        // Red de seguridad: si el correo del banco no trae un título que
+        // coincida (típico en servicios públicos, que varían de nombre mes a
+        // mes), el usuario puede marcarlo pagado a mano para ese mes puntual.
+        const pagadoManual = !match && !!(f.pagosManuales && f.pagosManuales[monthStr]);
+        const pagado = !!match || pagadoManual;
+        const atrasado = !pagado && isCurrentRealMonth && todayDayOfMonth > Number(f.diaVencimiento || 31);
+        return {
+          ...f,
+          pagado,
+          pagadoManual,
+          atrasado,
+          montoPagado: match ? Number(match.amount) : null,
+          fechaPagado: match ? match.date : null,
+        };
+      })
+      .sort((a, b) => Number(a.diaVencimiento || 31) - Number(b.diaVencimiento || 31)),
+    [fixedCosts, currentContext, monthDebitsCtx, isCurrentRealMonth, todayDayOfMonth, monthStr]);
+
+  const handleToggleManualPago = async (costo, e) => {
+    e.stopPropagation();
+    try {
+      await markFixedCostPaid(costo.id, monthStr, !costo.pagadoManual);
+    } catch (error) {
+      console.error('Error al marcar costo fijo como pagado:', error);
+    }
+  };
 
   const catIconMap = useMemo(() => {
     const m = {};
@@ -391,6 +446,76 @@ export default function Presupuestos({ onNavigate }) {
             )}
           </Card>
         </div>
+
+        {/* Costos fijos — checklist mensual */}
+        <Card padding={16}>
+          <div style={{ marginBottom: 12 }}>
+            <SectionHeader
+              title="Costos fijos" eyebrow={`${localFixedCosts.length} ${localFixedCosts.length === 1 ? 'costo' : 'costos'}`}
+              action="Agregar"
+              onAction={() => { setEditingCostoFijo(null); setIsCostoFijoModalOpen(true); }}
+            />
+          </div>
+
+          {localFixedCosts.length === 0 ? (
+            <div style={{ textAlign: 'center', padding: '28px 0', color: 'var(--fg-3)' }}>
+              <IconTile icon="event_repeat" hue="clay" size={48} />
+              <div style={{ marginTop: 10, fontSize: 13, color: 'var(--fg-2)' }}>No hay costos fijos configurados.</div>
+            </div>
+          ) : (
+            <div>
+              {localFixedCosts.map((costo, i) => {
+                const detectadoAuto = costo.montoPagado != null;
+                return (
+                <div
+                  key={costo.id}
+                  onClick={() => { setEditingCostoFijo(costo); setIsCostoFijoModalOpen(true); }}
+                  style={{
+                    display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10,
+                    padding: '12px 0', cursor: 'pointer',
+                    borderBottom: i < localFixedCosts.length - 1 ? '1px solid var(--border-default)' : 'none',
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0, flex: 1 }}>
+                    <IconBtn
+                      icon={costo.pagado ? 'check_circle' : 'radio_button_unchecked'}
+                      fill={costo.pagado}
+                      tone="sunken"
+                      size={30}
+                      title={
+                        detectadoAuto ? 'Detectado automáticamente en tus movimientos'
+                          : costo.pagadoManual ? 'Marcado a mano — toca para quitar la marca'
+                            : 'Marcar como pagado a mano'
+                      }
+                      onClick={detectadoAuto ? undefined : (e) => handleToggleManualPago(costo, e)}
+                      style={costo.pagado
+                        ? { background: 'var(--success-50)', color: 'var(--success-700)', cursor: detectadoAuto ? 'default' : 'pointer' }
+                        : undefined}
+                    />
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontSize: 13.5, fontWeight: 700, color: 'var(--fg-1)' }}>{costo.nombre}</div>
+                      <div style={{ fontSize: 11, color: 'var(--fg-3)', marginTop: 1, fontFamily: 'var(--font-mono)' }}>
+                        {detectadoAuto
+                          ? `Pagado ${formatCurrency(costo.montoPagado, 'COP')}`
+                          : costo.pagadoManual
+                            ? 'Marcado como pagado a mano'
+                            : `Vence el ${costo.diaVencimiento} · esperado ${formatCurrency(costo.monto, 'COP')}`}
+                      </div>
+                    </div>
+                  </div>
+                  {detectadoAuto
+                    ? <Pill variant="success" icon="check_circle">Pagado</Pill>
+                    : costo.pagadoManual
+                      ? <Pill variant="success" icon="check_circle">Pagado (manual)</Pill>
+                      : costo.atrasado
+                        ? <Pill variant="danger" icon="warning">Atrasado</Pill>
+                        : <Pill variant="neutral">Pendiente</Pill>}
+                </div>
+                );
+              })}
+            </div>
+          )}
+        </Card>
       </div>
     );
   };
@@ -441,6 +566,12 @@ export default function Presupuestos({ onNavigate }) {
         onClose={() => { setIsMetaModalOpen(false); setEditingMeta(null); }}
         currentContext={currentContext}
         editingMeta={editingMeta}
+      />
+      <CostoFijoModal
+        isOpen={isCostoFijoModalOpen}
+        onClose={() => { setIsCostoFijoModalOpen(false); setEditingCostoFijo(null); }}
+        currentContext={currentContext}
+        editingCostoFijo={editingCostoFijo}
       />
     </div>
     </>
