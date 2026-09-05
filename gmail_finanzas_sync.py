@@ -1,9 +1,12 @@
 import os
+import io
+import re
 import json
 import base64
 import argparse
 import datetime
 from bs4 import BeautifulSoup
+from pypdf import PdfReader
 
 # Google API
 from google.auth.transport.requests import Request
@@ -58,6 +61,27 @@ MAX_BODY_CHARS = 3500
 
 # Cuántas transacciones recientes traer para construir la memoria de comercios
 MEMORY_HISTORY_LIMIT = 400
+
+# --- Extractos de deuda (tarjetas de crédito / créditos) ---
+# Algunos bancos mandan el extracto mensual como un PDF CIFRADO con una clave
+# personal (cédula/NIT del titular). Esos correos van a la misma etiqueta
+# Bancos/PendingBot, pero NO son una transacción individual: los detectamos
+# por remitente y los procesamos aparte (desencriptar → extraer texto →
+# Gemini → guardar snapshot de la deuda). La contraseña vive SOLO en la
+# variable de entorno EXTRACTO_PDF_PASSWORD (secret de GitHub Actions) —
+# nunca se guarda en este archivo ni en Firestore.
+#
+# Mapea el correo remitente al nombre de la entidad/deuda. Agregar aquí
+# nuevos bancos (ej. Finandina) cuando se confirme el remitente real.
+# OJO: los extractos de Fiducuenta/Consolidado de Bancolombia NO están acá
+# a propósito — son cuentas de inversión, no deuda.
+EXTRACTO_DEBT_SENDERS = {
+    'extracto@clientesbancoavvillas.com.co': 'AV Villas',
+    'bancodavivienda@davivienda.com': 'Davivienda (TC Retail SU+)',
+}
+
+# Colección de Firestore donde vive el snapshot más reciente de cada deuda.
+DEUDAS_COLLECTION = 'finance_deudas'
 
 
 def _load_token(db):
@@ -163,6 +187,146 @@ def extract_email_body(payload):
                 text_content = decoded
 
     return text_content.strip()
+
+
+def _sender_email(payload):
+    """Extrae la dirección de correo del header 'From' (en minúsculas)."""
+    from_header = next((h.get('value', '') for h in payload.get('headers', [])
+                        if h.get('name', '').lower() == 'from'), '')
+    match = re.search(r'[\w.+-]+@[\w-]+\.[\w.-]+', from_header)
+    return match.group(0).lower() if match else ''
+
+
+def _find_pdf_attachment_id(payload):
+    """Busca recursivamente el primer adjunto .pdf en el payload y devuelve
+    su attachmentId (o None si no hay ninguno)."""
+    def walk(parts):
+        for part in parts:
+            filename = (part.get('filename') or '')
+            body = part.get('body', {})
+            if filename.lower().endswith('.pdf') and body.get('attachmentId'):
+                return body['attachmentId']
+            if 'parts' in part:
+                found = walk(part['parts'])
+                if found:
+                    return found
+        return None
+    return walk(payload.get('parts', [])) if 'parts' in payload else None
+
+
+def _download_and_decrypt_pdf(service, msg_id, attachment_id, password):
+    """Descarga el adjunto PDF desde Gmail y lo desencripta con la
+    contraseña dada. Devuelve el texto plano extraído de todas las páginas."""
+    att = service.users().messages().attachments().get(
+        userId='me', messageId=msg_id, id=attachment_id
+    ).execute()
+    data = base64.urlsafe_b64decode(att['data'])
+
+    reader = PdfReader(io.BytesIO(data))
+    if reader.is_encrypted:
+        result = reader.decrypt(password)
+        if not result:
+            raise ValueError("Contraseña incorrecta o PDF no se pudo desencriptar.")
+
+    texto = "\n".join(page.extract_text() or "" for page in reader.pages)
+    return texto
+
+
+def procesar_extracto_deuda_con_ia(texto, entidad, client):
+    """Analiza el texto de un extracto de deuda con Gemini y devuelve el
+    snapshot: saldoTotal, cupoTotal, pagoMinimo, pagoMinimoReducido,
+    fechaFacturacion, fechaPago, moneda."""
+    prompt = f"""Eres un experto asistente financiero. El siguiente es el texto extraído de un
+extracto colombiano de tarjeta de crédito o producto de crédito (entidad: {entidad}).
+Extrae ÚNICAMENTE estos campos y devuelve un objeto JSON:
+
+- saldoTotal: saldo total adeudado (número, sin símbolos de moneda ni separadores de miles).
+- cupoTotal: cupo/límite total del producto (número). Si no aparece, usa null.
+- pagoMinimo: valor del pago mínimo exigido (número).
+- pagoMinimoReducido: valor del pago mínimo reducido, si aparece (número o null).
+- fechaFacturacion: fecha de facturación/corte del extracto, formato YYYY-MM-DD.
+- fechaPago: fecha límite de pago ("pague hasta"), formato YYYY-MM-DD.
+- moneda: 'COP' salvo que el extracto indique explícitamente otra.
+
+Texto del extracto:
+\"\"\"{texto[:6000]}\"\"\"
+
+Devuelve solo el JSON, sin explicación ni markdown. Formato esperado:
+{{"saldoTotal": 0, "cupoTotal": 0, "pagoMinimo": 0, "pagoMinimoReducido": 0, "fechaFacturacion": "", "fechaPago": "", "moneda": "COP"}}
+"""
+    response = client.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            system_instruction="Eres un asistente financiero. Respondes únicamente con un objeto JSON válido.",
+            response_mime_type="application/json",
+            temperature=0,
+        ),
+    )
+    return json.loads(response.text)
+
+
+def _slug(texto):
+    return re.sub(r'[^a-z0-9]+', '-', texto.lower()).strip('-')
+
+
+def registrar_deuda(db, entidad, datos):
+    """Guarda (reemplaza) el snapshot más reciente de una deuda en Firestore."""
+    def _num(v):
+        return float(v) if v is not None else None
+
+    doc_id = _slug(entidad)
+    db.collection(DEUDAS_COLLECTION).document(doc_id).set({
+        'entidad': entidad,
+        'saldoTotal': _num(datos.get('saldoTotal')) or 0,
+        'cupoTotal': _num(datos.get('cupoTotal')),
+        'pagoMinimo': _num(datos.get('pagoMinimo')) or 0,
+        'pagoMinimoReducido': _num(datos.get('pagoMinimoReducido')),
+        'fechaFacturacion': datos.get('fechaFacturacion') or None,
+        'fechaPago': datos.get('fechaPago') or None,
+        'moneda': datos.get('moneda') or 'COP',
+        'updatedAt': firestore.SERVER_TIMESTAMP,
+    })
+
+
+def procesar_correo_extracto_deuda(db, service, client, msg_id, payload, entidad):
+    """Pipeline completo para un correo de extracto de deuda cifrado:
+    descarga el PDF, lo desencripta, extrae los datos con Gemini y los guarda
+    en Firestore. Devuelve True si quedó guardado (correo listo para
+    marcarse como procesado), False si hay que reintentar más tarde."""
+    password = os.environ.get('EXTRACTO_PDF_PASSWORD')
+    if not password:
+        print("❌ Falta la variable de entorno EXTRACTO_PDF_PASSWORD. No se puede desencriptar el extracto.")
+        return False
+
+    attachment_id = _find_pdf_attachment_id(payload)
+    if not attachment_id:
+        print(f"⚠️ No se encontró un adjunto PDF en el correo de extracto de {entidad}.")
+        return False
+
+    try:
+        texto = _download_and_decrypt_pdf(service, msg_id, attachment_id, password)
+    except Exception as e:
+        print(f"❌ Error desencriptando/leyendo el PDF de {entidad}: {e}")
+        return False
+
+    if not texto.strip():
+        print(f"⚠️ El PDF de {entidad} se desencriptó pero no se pudo extraer texto legible.")
+        return False
+
+    try:
+        datos = procesar_extracto_deuda_con_ia(texto, entidad, client)
+    except Exception as e:
+        print(f"❌ Error analizando el extracto de {entidad} con Gemini: {e}")
+        return False
+
+    try:
+        registrar_deuda(db, entidad, datos)
+        print(f"✅ Deuda de {entidad} actualizada: saldo {datos.get('saldoTotal')}, vence {datos.get('fechaPago')}")
+        return True
+    except Exception as e:
+        print(f"❌ Error guardando la deuda de {entidad} en Firestore: {e}")
+        return False
 
 
 def _prefetch_context(db):
@@ -634,6 +798,20 @@ def main():
         # Descargar el correo completo
         message_data = service.users().messages().get(userId='me', id=msg_id, format='full').execute()
         payload = message_data.get('payload', {})
+
+        # Extractos de deuda (PDF cifrado): se detectan por remitente y se
+        # procesan por su propio pipeline (desencriptar → Gemini → Firestore),
+        # ANTES del gate de "no es transacción" — si no, se descartarían ahí.
+        sender = _sender_email(payload)
+        if sender in EXTRACTO_DEBT_SENDERS:
+            entidad = EXTRACTO_DEBT_SENDERS[sender]
+            print(f"💳 Detectado extracto de deuda de {entidad} ({sender}). Procesando aparte...")
+            if procesar_correo_extracto_deuda(db, service, client, msg_id, payload, entidad):
+                mark_as_processed(service, msg_id, label_id)
+                save_processed_email(db, msg_id)
+            else:
+                print(f"⚠️ El extracto de {entidad} no se pudo procesar. Se mantendrá la etiqueta para reintentar luego.")
+            continue
 
         # Gate barato pre-LLM: los extractos / estados de cuenta no son
         # transacciones individuales. Se detectan por asunto y se descartan
