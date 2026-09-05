@@ -30,3 +30,4 @@ jobs:
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           FIREBASE_ADMIN_SDK_JSON: ${{ secrets.FIREBASE_ADMIN_SDK_JSON }}
+          EXTRACTO_PDF_PASSWORD: ${{ secrets.EXTRACTO_PDF_PASSWORD }}

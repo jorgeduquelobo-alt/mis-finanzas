@@ -38,6 +38,7 @@ export const FinanceProvider = ({ children }) => {
     const [budgets, setBudgets] = useState({});
     const [goals, setGoals] = useState([]);
     const [fixedCosts, setFixedCosts] = useState([]);
+    const [deudas, setDeudas] = useState([]);
     const [loading, setLoading] = useState(true);
     const [currentContext, setCurrentContext] = useState('unified');
 
@@ -164,11 +165,25 @@ export const FinanceProvider = ({ children }) => {
             console.error("Error fetching fixed costs:", error);
         });
 
+        // Subscribe to deudas collection (snapshot por deuda, actualizado por
+        // gmail_finanzas_sync.py al procesar cada extracto de tarjeta/crédito).
+        // Solo lectura desde la app: el pipeline de Python es quien escribe.
+        const unsubscribeDeudas = onSnapshot(collection(db, 'finance_deudas'), (snapshot) => {
+            const deudasData = snapshot.docs.map(doc => ({
+                id: doc.id,
+                ...doc.data(),
+            }));
+            setDeudas(deudasData);
+        }, (error) => {
+            console.error("Error fetching deudas:", error);
+        });
+
         // Cleanup subscriptions on unmount
         return () => {
             unsubscribeTransactions();
             unsubscribeGoals();
             unsubscribeFixedCosts();
+            unsubscribeDeudas();
         }
     }, []);
 
@@ -482,6 +497,7 @@ export const FinanceProvider = ({ children }) => {
         budgets,
         goals,
         fixedCosts,
+        deudas,
         loading,
         currentContext,
         setCurrentContext,
@@ -504,7 +520,7 @@ export const FinanceProvider = ({ children }) => {
         fetchBudgetConfig,
         saveBudgetConfig,
     }), [
-        transactions, budgets, goals, fixedCosts, loading, currentContext, getTotals, accountBalances, setSaldoInicial, appConfig,
+        transactions, budgets, goals, fixedCosts, deudas, loading, currentContext, getTotals, accountBalances, setSaldoInicial, appConfig,
         addTransaction, addTransfer, deleteTransaction, updateTransaction,
         updateAppConfig, addGoal, updateGoal, deleteGoal,
         addFixedCost, updateFixedCost, deleteFixedCost, markFixedCostPaid, fetchBudgetConfig, saveBudgetConfig,

@@ -17,7 +17,7 @@ const txDate = (t) => (t.date?.toDate ? t.date.toDate() : new Date(t.date));
 const midnight = (d) => { const x = new Date(d); x.setHours(0, 0, 0, 0); return x; };
 
 export default function Insights({ onNavigate, onEditTransaction }) {
-  const { transactions, loading, currentContext, appConfig, accountBalances } = useFinance();
+  const { transactions, loading, currentContext, appConfig, accountBalances, deudas } = useFinance();
 
   // Tasa USD→COP configurable en Settings → Finanzas; fallback al valor histórico.
   const exchangeRate = Number(appConfig?.exchangeRate) > 0
@@ -37,6 +37,25 @@ export default function Insights({ onNavigate, onEditTransaction }) {
     [cuentasSaldo, accountBalances]
   );
   const fondoBalance = accountBalances?.[fondoNombre]?.balance;
+
+  // Deudas: snapshot por acreedor guardado por gmail_finanzas_sync.py al leer
+  // cada extracto (PDF cifrado, desencriptado con la contraseña del secret de
+  // GitHub Actions). Solo estado actual — sin detalle transaccional — se
+  // actualiza cada vez que llega un extracto nuevo (hasta 1 vez al mes).
+  const deudasOrdenadas = useMemo(
+    () => [...(deudas || [])].sort((a, b) => (a.fechaPago || '9999').localeCompare(b.fechaPago || '9999')),
+    [deudas]
+  );
+  const deudaTotal = useMemo(
+    () => deudasOrdenadas.reduce((sum, d) => sum + (d.saldoTotal || 0), 0),
+    [deudasOrdenadas]
+  );
+  const formatFechaCorta = (iso) => {
+    if (!iso) return '';
+    const [y, m, d] = iso.split('-').map(Number);
+    if (!y || !m || !d) return iso;
+    return new Date(y, m - 1, d).toLocaleDateString('es-CO', { day: 'numeric', month: 'short' });
+  };
 
   const filtered = useMemo(() => (
     transactions.filter(t => {
@@ -249,6 +268,44 @@ export default function Insights({ onNavigate, onEditTransaction }) {
               </div>
             </div>
           )}
+        </Card>
+      )}
+
+      {/* Deudas — snapshot por acreedor, actualizado al llegar cada extracto */}
+      {deudasOrdenadas.length > 0 && (
+        <Card padding={18} style={{ borderRadius: 24 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <Eyebrow>Deudas</Eyebrow>
+            <Icon name="credit_card" size={18} color="var(--fg-3)" />
+          </div>
+          <div style={{ marginTop: 6, fontSize: 30, fontWeight: 800, letterSpacing: '-0.02em', color: 'var(--danger-700, #b3261e)', fontVariantNumeric: 'tabular-nums' }}>
+            {formatCurrency(deudaTotal, 'COP')}
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 12 }}>
+            {deudasOrdenadas.map((d, i) => {
+              const pctUsado = d.cupoTotal ? Math.min(100, (d.saldoTotal / d.cupoTotal) * 100) : null;
+              return (
+                <div
+                  key={d.id}
+                  style={{
+                    paddingBottom: 8,
+                    borderBottom: i < deudasOrdenadas.length - 1 ? '1px dashed var(--border-default)' : 'none',
+                  }}
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13 }}>
+                    <span style={{ color: 'var(--fg-1)', fontWeight: 700 }}>{d.entidad}</span>
+                    <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 700, color: 'var(--fg-1)' }}>
+                      {formatCurrency(d.saldoTotal || 0, 'COP')}
+                    </span>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: 'var(--fg-3)', marginTop: 2 }}>
+                    <span>{pctUsado != null ? `${pctUsado.toFixed(0)}% del cupo usado` : ''}</span>
+                    <span>{d.fechaPago ? `Vence ${formatFechaCorta(d.fechaPago)}` : ''}</span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         </Card>
       )}
 
